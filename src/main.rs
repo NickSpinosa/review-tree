@@ -1,6 +1,7 @@
 #![allow(unused)]
 use anyhow::Result;
 use dirs::home_dir;
+use ignore::{Walk, WalkBuilder};
 use serde::Deserialize;
 use std::{
     fs::{read_dir, DirEntry},
@@ -8,16 +9,13 @@ use std::{
     path::Path,
     process::Command,
     str::from_utf8,
+    sync::mpsc,
 };
 
 fn main() -> Result<()> {
-    let requests = get_review_requests();
-    println!("{:?}", requests);
-
-    println!("is git repo ~: {}", is_get_repo(&Path::new("~")));
-    println!("is git repo tftcalc: {}", is_get_repo(&Path::new("~/code/tftcalc")));
-    println!("local repo tftcalc: {:?}", get_local_repo(&Path::new("~/code/tftcalc"))?);
-    println!("find git repos: {:?}", find_repos());
+    let lr = get_local_repos_with_review_requests()?;
+    println!("find local repos with review requests: {:?}", lr);
+    create_worktrees(lr)?;
 
     Ok(())
 }
@@ -25,13 +23,27 @@ fn main() -> Result<()> {
 #[derive(Debug, Clone)]
 struct ReviewRequest {
     pub repo: GitRepo,
-    pub branch: String,
+    pub id: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct GitRepo {
     pub owner: String,
     pub repo: String,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+struct GHRepository {
+    pub name: String,
+    pub name_with_owner: String,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+struct GHReviewRequest {
+    pub number: u64,
+    pub repository: GHRepository,
 }
 
 impl From<String> for GitRepo {
@@ -45,37 +57,107 @@ impl From<String> for GitRepo {
     }
 }
 
-impl From<String> for ReviewRequest {
-    fn from(value: String) -> Self {
-        let rv: Vec<&str> = value.split("\t").collect();
-        //todo: properly handle this out of bounds error
-        let repo: GitRepo = rv.get(0).unwrap().to_string().into();
-        let branch = rv.get(3).unwrap().to_string();
+impl From<GHReviewRequest> for ReviewRequest {
+    fn from(value: GHReviewRequest) -> Self {
+        ReviewRequest {
+            repo: value.repository.name_with_owner.into(),
+            id: value.number,
+        }
+    }
+}
 
-        ReviewRequest { repo, branch }
+impl From<&GHReviewRequest> for ReviewRequest {
+    fn from(value: &GHReviewRequest) -> Self {
+        ReviewRequest {
+            repo: value.repository.name_with_owner.clone().into(),
+            id: value.number,
+        }
     }
 }
 
 fn get_review_requests() -> Result<Vec<ReviewRequest>> {
     let o = Command::new("sh")
         .arg("-c")
-        .arg("gh search prs --state=open --review-requested=@me")
+        .arg("gh search prs --state=open --review-requested=@me --json \"repository,number\"")
         .output()?;
     let output_string = from_utf8(&o.stdout)?;
 
-    let requests = output_string
-        .split("\n")
-        .filter(|s| s != &"")
-        .map(|r| ReviewRequest::from(r.to_owned()))
-        .collect();
-
-    Ok(requests)
+    let ghreq: Vec<GHReviewRequest> = serde_json::from_str(output_string)?;
+    Ok(ghreq.iter().map(ReviewRequest::from).collect())
 }
 
-fn is_get_repo(path: &Path) -> bool {
+fn create_worktrees(reqs: Vec<LocalReviewRequest>) -> Result<()> {
+    for req in reqs {
+        let o = Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "cd {} && git worktree add ./reviews/{}",
+                req.path, req.branch
+            ))
+            .output()?;
+        println!("Created worktree for {} at branch {}", req.repo.repo, req.branch);
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct LocalReviewRequest {
+    pub branch: String,
+    pub path: String,
+    pub repo: GitRepo,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+struct GHBranch {
+    head_ref_name: String,
+}
+
+fn get_branch_name(pr_number: u64, path: String) -> Result<String> {
+    let o = Command::new("sh")
+        .arg("-c")
+        .arg(format!(
+            "cd {} && gh pr view {} --json \"headRefName\"",
+            path, pr_number
+        ))
+        .output()?;
+    let branch: GHBranch = serde_json::from_str(from_utf8(&o.stdout)?)?;
+
+    Ok(branch.head_ref_name)
+}
+
+fn get_local_repos_with_review_requests() -> Result<Vec<LocalReviewRequest>> {
+    let reqs = get_review_requests()?;
+    let repos = find_repos();
+
+    Ok(reqs
+        .iter()
+        .map(|req| {
+            repos.iter().find(|v| v.repo == req.repo).and_then(|lr| {
+                get_branch_name(req.id, lr.path.clone())
+                    .map(|branch| {
+                        Some(LocalReviewRequest {
+                            branch,
+                            path: lr.path.clone(),
+                            repo: lr.repo.clone(),
+                        })
+                    })
+                    .unwrap_or(None)
+            })
+        })
+        .filter(|v| v.is_some())
+        .map(|v| v.unwrap())
+        .collect())
+}
+
+fn is_github_repo(path: &Path) -> bool {
     let output = Command::new("sh")
         .arg("-c")
-        .arg(format!("cd {} && git status", path.to_str().unwrap_or("~")))
+        .arg(format!(
+            "cd {} && gh repo view",
+            path.to_str().unwrap_or("~")
+        ))
         .output();
 
     if let Ok(o) = output {
@@ -84,7 +166,6 @@ fn is_get_repo(path: &Path) -> bool {
 
     false
 }
-
 
 #[derive(Debug, Clone)]
 struct LocalRepo {
@@ -95,49 +176,71 @@ struct LocalRepo {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GHRepoViewJSON {
-    name_with_owner: String
+    name_with_owner: String,
 }
 
-fn get_local_repo(path: &Path) -> Result<LocalRepo> {
+fn build_local_repo(path: &Path) -> Result<LocalRepo> {
     let path_str = path.to_str().unwrap_or("~");
     let output = Command::new("sh")
         .arg("-c")
-        .arg(format!("cd {} && gh repo view --json \"nameWithOwner\"", path_str))
+        .arg(format!(
+            "cd {} && gh repo view --json \"nameWithOwner\"",
+            path_str
+        ))
         .output()?;
 
     let repo: GHRepoViewJSON = serde_json::from_str(from_utf8(&output.stdout)?)?;
 
-    Ok(LocalRepo { path: path_str.to_string(), repo: GitRepo::from(repo.name_with_owner)})
+    Ok(LocalRepo {
+        path: path_str.to_string(),
+        repo: GitRepo::from(repo.name_with_owner),
+    })
 }
 
 fn find_repos() -> Vec<LocalRepo> {
-    find_repos_rec(&home_dir().unwrap(), &mut Vec::new()).to_vec()
-}
+    let mut repos = vec![];
+    let (tx, mut rx) = mpsc::channel();
 
-fn find_repos_rec<'r>(path: &Path, repos: &'r mut Vec<LocalRepo>) -> &'r mut Vec<LocalRepo> {
-    println!("visiting path: {:?}", path);
-    println!("path is dir: {}", path.is_dir());
-    if path.is_dir() {
-        if is_get_repo(path) {
-            let lr = get_local_repo(path);
-            // todo: don't swallow error
-            if let Ok(repo) = lr {
-                repos.push(repo);
-            }
-        }
-        let dir = read_dir(path);
+    let walker = WalkBuilder::new(&home_dir().unwrap())
+        .standard_filters(true)
+        .follow_links(false)
+        .git_global(true)
+        .same_file_system(true)
+        .threads(6)
+        .build_parallel();
 
-        if let Ok(subdirs) = dir {
-            for entry in subdirs {
-                let new_path = entry
-                    .map(|e| e.path());
+    walker.run(|| {
+        let tx = tx.clone();
+        Box::new(move |result| {
+            use ignore::WalkState::*;
 
-                if let Ok(np) = new_path {
-                    &repos.append(find_repos_rec(&np, &mut repos.clone()));
+            match result {
+                Ok(entry) => {
+                    let path = entry.path();
+                    if is_github_repo(path) {
+                        match build_local_repo(path) {
+                            Ok(repo) => {
+                                tx.send(repo);
+                            }
+                            Err(err) => println!("ERROR: {}", err),
+                        };
+                        Skip
+                    } else {
+                        Continue
+                    }
+                }
+                Err(err) => {
+                    println!("WALK ERROR: {}", err);
+                    Continue
                 }
             }
-        } 
+        })
+    });
+
+    drop(tx);
+    while let Ok(res) = rx.recv() {
+        repos.push(res);
     }
-    
+
     repos
 }
