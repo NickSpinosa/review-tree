@@ -181,6 +181,7 @@ dependencies = [
  "ignore",
  "serde",
  "serde_json",
+ "thiserror",
 ]
 
 [[package]]
