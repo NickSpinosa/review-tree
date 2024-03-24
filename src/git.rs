@@ -1,7 +1,6 @@
 use crate::prelude::*;
-use std::{path::Path, process::Command, str::from_utf8};
-
 use serde::Deserialize;
+use std::{path::Path, process::Command, str::from_utf8};
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -10,12 +9,32 @@ pub struct GitRepo {
     pub repo: String,
 }
 
+impl Default for GitRepo {
+    fn default() -> Self {
+        Self {
+            owner: Default::default(),
+            repo: Default::default(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct LocalReviewRequest {
     pub branch: String,
     pub path: String,
     pub repo: GitRepo,
     pub title: String,
+}
+
+impl Default for LocalReviewRequest {
+    fn default() -> Self {
+        Self {
+            branch: Default::default(),
+            path: Default::default(),
+            repo: Default::default(),
+            title: Default::default(),
+        }
+    }
 }
 
 #[derive(Deserialize, Debug)]
@@ -88,7 +107,6 @@ pub enum BuildReviewRequestErrors {
     UnknownGithubCliError(String),
 }
 
-// todo: improve error handling
 pub fn build_local_review_requests(path: &Path) -> AnyhowResult<Vec<LocalReviewRequest>> {
     let path_str = path.to_str().unwrap_or("~");
     let output = Command::new("sh")

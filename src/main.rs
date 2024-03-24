@@ -1,32 +1,22 @@
-#![allow(unused)]
-use config::Config;
-use dirs::home_dir;
-use ignore::WalkBuilder;
-use serde::Deserialize;
-use core::find_repos;
-use std::{
-    fmt::Display,
-    path::{Path, PathBuf},
-    process::{Command, ExitStatus},
-    str::from_utf8,
-};
-use thiserror::Error;
+// #![allow(unused)]
+use clap::Parser;
+use config::Args;
+use utils::report_results;
+use core::find_review_requests;
+mod config;
+mod core;
 mod git;
 mod prelude;
-mod core;
-mod config;
 mod utils;
 
 use crate::prelude::*;
 
 fn main() -> AnyhowResult<()> {
-    let cfg = Config {
-        num_threads: 16,
-        root_dir: "/home/nick/code".into(),
-        ..Config::default()
-    };
-
-    find_repos(cfg);
+    let mut args = Args::parse();
+    args.load_config_file()?;
+    
+    let outputs = find_review_requests(args);
+    report_results(outputs);
 
     Ok(())
 }
