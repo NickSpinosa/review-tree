@@ -11,6 +11,18 @@ pub fn create_worktree(req: &LocalReviewRequest) -> AnyhowResult<()> {
         ))
         .output()?;
 
+    // TODO: handle case when there is already a worktree for the branch
+    if !o.status.success() {
+        let err = from_utf8(&o.stderr)?;
+        eprintln!(
+            "{} {} {} {}",
+            "error creating worktree for: ".red(),
+            req.title.yellow().bold(),
+            "with message: ".red(),
+            err.yellow().bold()
+        );
+    }
+
     Ok(())
 }
 
@@ -18,11 +30,24 @@ pub fn create_tmux_session(req: &LocalReviewRequest) -> AnyhowResult<()> {
     let o = Command::new("sh")
         .arg("-c")
         .arg(format!(
-            "cd {} && tmux new -d -s Code_Review:_{}",
+            "cd {}/reviews/{} && tmux new -d -s Code_Review:_{}",
             req.path,
+            req.branch,
             req.title.replace(" ", "_")
         ))
         .output()?;
+
+    // TODO: better error handling 
+    if !o.status.success() {
+        let err = from_utf8(&o.stderr)?;
+        eprintln!(
+            "{} {} {} {}",
+            "error creating tmux session for: ".red(),
+            req.title.yellow().bold(),
+            "with message: ".red(),
+            err.yellow().bold()
+        );
+    }
 
     Ok(())
 }
